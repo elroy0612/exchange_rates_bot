@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import requests
@@ -6,6 +7,7 @@ from langchain.tools import tool
 from langchain_tavily import TavilySearch
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
+from langchain_core.messages import AIMessage, ToolMessage
 
 from api import API_URL, get_session
 
@@ -157,14 +159,47 @@ def get_agent(today: str):
 
 agent = get_agent(str(date.today()))
 
+
+# ---------- 도구 사용 과정을 사람이 읽기 좋은 문장으로 바꾸는 함수 ----------
+def describe_call(tool_call):
+    """모델이 부른 도구를 한 줄 설명으로. 예: 📅 과거 환율 조회: USD → KRW, 2026-09-30 ~ 2026-10-31"""
+    name, a = tool_call["name"], tool_call["args"]
+    if name == "get_exchange_rate":
+        return f"💱 현재 환율 조회: {a.get('amount', 1)} {a.get('from_currency')} → {a.get('to_currency')}"
+    if name == "get_historical_exchange_rate":
+        when = f"{a.get('start_date')} ~ {a['end_date']}" if a.get("end_date") else a.get("start_date")
+        return f"📅 과거 환율 조회: {a.get('from_currency')} → {a.get('to_currency')}, {when}"
+    if name == "tavily_search":
+        kind = "📰 뉴스 검색" if a.get("topic") == "news" else "🔎 웹 검색"
+        return f"{kind}: \"{a.get('query')}\""
+    return f"🔧 {name}"
+
+
+def describe_result(tool_message):
+    """도구 결과를 보여 줄 형태로. 검색 결과는 기사 제목 링크 목록으로 정리"""
+    if tool_message.name == "tavily_search":
+        try:
+            results = json.loads(tool_message.content).get("results", [])
+        except (json.JSONDecodeError, AttributeError):
+            return str(tool_message.content)[:300]
+        if not results:
+            return "검색 결과 없음"
+        return "\n".join(f"- [{r.get('title', '제목 없음')}]({r.get('url')})" for r in results)
+    return str(tool_message.content).replace("\n", "  \n")  # 마크다운에서 줄바꿈 유지
+
+
 st.title("환율 안내 챗봇")
 
 # 세션에 messages 저장공간 만들기 (처음 실행 시 1회만 생성)
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# 지난 대화 출력 (답변에 도구를 썼다면 그 과정도 접힌 상자로 함께 보여 줌)
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
+        if message.get("steps"):
+            with st.expander(f"✅ 도구 {message['tool_count']}회 사용"):
+                st.markdown("\n\n".join(message["steps"]))
         st.markdown(message["content"])
 
 prompt = st.chat_input("무엇을 도와드릴까요?")
@@ -174,11 +209,51 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 답변 말풍선 안에서 로딩 표시
     with st.chat_message("assistant"):
-        with st.spinner("답변을 생성하는 중..."):
-            response = agent.invoke({"messages": st.session_state.messages})
-        answer = response["messages"][-1].content
-        st.markdown(answer)
+        status_box = st.empty()  # 도구 사용 과정이 표시될 자리
+        answer_box = st.empty()  # 답변이 한 글자씩 채워질 자리
+        status = status_box.status("🤔 질문을 분석하는 중...", expanded=False)
 
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+        steps, tool_count, answer = [], 0, ""
+        # 모델에는 role/content만 보냄 (steps 같은 화면용 정보는 제외)
+        history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+
+        try:
+            # stream_mode="messages": 모델이 만드는 글자 조각을 실시간으로 받음
+            # stream_mode="updates": 도구 호출·도구 결과처럼 한 단계가 끝날 때마다 받음
+            for mode, chunk in agent.stream({"messages": history}, stream_mode=["updates", "messages"]):
+                if mode == "messages":
+                    token, meta = chunk
+                    if meta.get("langgraph_node") == "model" and isinstance(token.content, str) and token.content:
+                        answer += token.content
+                        answer_box.markdown(answer + "▌")  # 커서처럼 보이는 표시
+                    continue
+
+                for update in chunk.values():
+                    for msg in (update or {}).get("messages", []):
+                        if isinstance(msg, AIMessage) and msg.tool_calls:
+                            # 도구를 부르기 전에 모델이 한 중간 말은 최종 답변이 아니므로 지움
+                            answer = ""
+                            answer_box.empty()
+                            for tc in msg.tool_calls:
+                                tool_count += 1
+                                line = f"**{describe_call(tc)}**"
+                                steps.append(line)
+                                status.markdown(line)
+                                status.update(label=f"{describe_call(tc)} 중...")
+                        elif isinstance(msg, ToolMessage):
+                            result = describe_result(msg)
+                            steps.append(result)
+                            status.markdown(result)
+        except Exception as e:
+            answer = f"⚠️ 답변을 만드는 중 오류가 발생했어요: {e}"
+
+        if tool_count:
+            status.update(label=f"✅ 도구 {tool_count}회 사용", state="complete", expanded=False)
+        else:
+            status_box.empty()  # 도구를 안 썼으면 상태 상자를 없앰
+        answer_box.markdown(answer)
+
+    st.session_state.messages.append(
+        {"role": "assistant", "content": answer, "steps": steps, "tool_count": tool_count}
+    )

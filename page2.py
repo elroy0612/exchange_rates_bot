@@ -5,7 +5,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from api import API_URL, get_currencies, get_session
+from api import API_URL, COUNTRY_NAMES, currency_label, get_currencies, get_session
 
 HISTORY_START = date(1999, 1, 4)  # Frankfurter(ECB) 데이터가 시작되는 날
 
@@ -27,6 +27,60 @@ def get_timeseries(base, target, start, end):
     return df
 
 
+@st.cache_resource
+def get_report_model():
+    # LangChain은 불러오는 데 3초 넘게 걸리므로, 차트 페이지가 느려지지 않게
+    # 리포트 버튼을 처음 눌렀을 때만 불러온다.
+    from langchain.chat_models import init_chat_model
+    return init_chat_model("gpt-5.4-mini")
+
+
+REPORT_PROMPT = """너는 환율 데이터 분석가야. 아래 데이터만 근거로 한국어 환율 리포트를 써.
+데이터에 없는 원인(뉴스, 정책 등)은 추측하지 마.
+
+[통화쌍] 1 {base}({base_name}) → {target}({target_name})
+[기간] {start} ~ {end} ({period}, {count}일치 데이터, 주말·공휴일 제외)
+[요약 통계]
+- 시작 {first:,.2f} → 끝 {last:,.2f} (변동 {change:+,.2f}, {change_pct:+.2f}%)
+- 최고 {high:,.2f} ({high_date}) / 최저 {low:,.2f} ({low_date})
+- 평균 {mean:,.2f}, 하루 변동률 표준편차 {volatility:.2f}%
+[날짜별 환율]
+{series}
+
+아래 형식으로 써:
+### 📌 한 줄 요약
+### 📈 기간 중 흐름
+상승·하락 구간을 날짜와 함께 2~4개로 나눠 설명
+### 📊 변동성
+변동 폭이 컸던 시기와 전체적인 안정성
+### 💡 참고 포인트
+환전·여행·송금 관점에서 이 데이터가 의미하는 바 (투자 조언은 하지 마)
+
+[환율 방향 해석 기준 - 반드시 지켜]
+- 숫자(1 {base}당 {target})가 내려가면: {target}로 {base}를 사는 사람에게 유리(덜 냄),
+  {base}를 {target}로 바꾸는 사람에게 불리(덜 받음).
+- 숫자가 올라가면 그 반대.
+"""
+
+
+def build_report_prompt(df, base, target, period):
+    s = df[target]
+    # 데이터가 많으면(1년 ≈ 255일) 최대 60개 정도로 줄여서 보냄 (마지막 날은 항상 포함)
+    step = max(1, len(s) // 60)
+    sampled = pd.concat([s.iloc[::step], s.iloc[[-1]]])
+    sampled = sampled[~sampled.index.duplicated()]
+    return REPORT_PROMPT.format(
+        base=base, base_name=COUNTRY_NAMES.get(base, base),
+        target=target, target_name=COUNTRY_NAMES.get(target, target),
+        start=f"{s.index[0]:%Y-%m-%d}", end=f"{s.index[-1]:%Y-%m-%d}", period=period, count=len(s),
+        first=s.iloc[0], last=s.iloc[-1], change=s.iloc[-1] - s.iloc[0],
+        change_pct=(s.iloc[-1] / s.iloc[0] - 1) * 100,
+        high=s.max(), high_date=f"{s.idxmax():%Y-%m-%d}", low=s.min(), low_date=f"{s.idxmin():%Y-%m-%d}",
+        mean=s.mean(), volatility=s.pct_change().std() * 100,
+        series="\n".join(f"{d:%Y-%m-%d}: {v:,.2f}" for d, v in sampled.items()),
+    )
+
+
 st.title("📈 환율 차트")
 
 # 통화 목록 불러오기
@@ -41,9 +95,9 @@ codes = list(currencies.keys())
 # 입력 위젯
 col1, col2, col3 = st.columns(3)
 with col1:
-    base = st.selectbox("기준 통화", codes, index=codes.index("USD"))
+    base = st.selectbox("기준 통화", codes, index=codes.index("USD"), format_func=currency_label)
 with col2:
-    target = st.selectbox("대상 통화", codes, index=codes.index("KRW"))
+    target = st.selectbox("대상 통화", codes, index=codes.index("KRW"), format_func=currency_label)
 with col3:
     period = st.selectbox("기간", ["1개월", "3개월", "6개월", "1년"])
 
@@ -80,22 +134,24 @@ low_date, low = df[target].idxmin(), df[target].min()
 
 m1, m2, m3 = st.columns(3)
 m1.metric(
-    label=f"1 {base} → {target} (기준일: {df.index[-1]:%Y-%m-%d})",
+    label=f"1 {base} → {target}",
     value=f"{latest:,.2f}",
     delta=f"{change:,.2f} ({change / first * 100:+.2f}%)",
 )
+m1.caption(f"기준일: {df.index[-1]:%Y-%m-%d}")  # 제목이 길어 잘리지 않도록 카드 아래 작은 글씨로
+# 최고는 초록, 최저는 빨강 (제목은 :green[...] 마크다운 문법, 날짜 배지는 delta_color)
 m2.metric(
-    label=f"{period} 최고",
+    label=f":green[▲ {period} 최고]",
     value=f"{high:,.2f}",
     delta=f"{high_date:%Y-%m-%d}",
-    delta_color="off",  # 날짜를 보여 주는 용도라 색과 화살표를 끔
-    delta_arrow="off",
+    delta_color="green",
+    delta_arrow="off",  # 날짜를 보여 주는 용도라 화살표는 끔
 )
 m3.metric(
-    label=f"{period} 최저",
+    label=f":red[▼ {period} 최저]",
     value=f"{low:,.2f}",
     delta=f"{low_date:%Y-%m-%d}",
-    delta_color="off",
+    delta_color="red",
     delta_arrow="off",
 )
 
@@ -182,7 +238,8 @@ table_df = pd.DataFrame({
     "전일 대비": df[target].diff().values,
 }).iloc[::-1]  # 최신 날짜가 위로 오게
 
-with st.expander(f"📋 {period} 데이터 보기 ({len(table_df)}일)"):
+# ECB는 영업일에만 환율을 발표하므로 달력 일수(30일)보다 적게 나옴
+with st.expander(f"📋 {period} 데이터 보기 ({len(table_df)}일, 주말·공휴일 제외)"):
     st.dataframe(
         table_df,
         hide_index=True,
@@ -198,3 +255,36 @@ with st.expander(f"📋 {period} 데이터 보기 ({len(table_df)}일)"):
         file_name=f"{base}_{target}_{start}_{end}.csv",
         mime="text/csv",
     )
+
+# AI 환율 리포트
+st.divider()
+st.subheader("🤖 AI 환율 리포트")
+st.caption(f"선택한 기간({period})의 환율 데이터를 AI가 분석해 요약해 줘요. 변동 원인이 궁금하면 챗봇에 물어보세요.")
+
+# 만든 리포트는 통화쌍·기간·기준일별로 저장해서, 차트를 조작해 화면이 다시 그려져도 사라지지 않게 함
+st.session_state.setdefault("reports", {})
+report_key = (base, target, period, f"{df.index[-1]:%Y-%m-%d}")
+saved_report = st.session_state.reports.get(report_key)
+
+# 리포트 버튼을 초록색으로 (key="report_btn"을 주면 버튼을 감싼 칸에 .st-key-report_btn 클래스가 붙음)
+st.html("""
+<style>
+.st-key-report_btn button { background-color: #21a35a; border-color: #21a35a; color: white; }
+.st-key-report_btn button:hover { background-color: #1a8a4b; border-color: #1a8a4b; color: white; }
+.st-key-report_btn button:active, .st-key-report_btn button:focus { color: white; }
+</style>
+""")
+
+if st.button("리포트 다시 생성" if saved_report else "리포트 생성", key="report_btn"):
+    try:
+        model = get_report_model()
+        prompt = build_report_prompt(df, base, target, period)
+        with st.container(border=True):
+            # 모델이 만드는 글자를 받는 대로 화면에 바로 출력
+            report = st.write_stream(chunk.content for chunk in model.stream(prompt))
+        st.session_state.reports[report_key] = report
+    except Exception as e:
+        st.error(f"리포트를 만들지 못했어요: {e}")
+elif saved_report:
+    with st.container(border=True):
+        st.markdown(saved_report)

@@ -9,7 +9,8 @@ load_dotenv()
 # (st.html에 <style>만 넣으면 화면에 빈 공간을 차지하지 않음)
 st.html("""
 <style>
-[data-testid='stMarkdownContainer'] * {
+[data-testid='stMarkdownContainer'] *,
+[data-testid='stCaptionContainer'] * {  /* st.caption(작은 글씨)은 별도 컨테이너를 씀 */
     word-break: keep-all !important;
     overflow-wrap: break-word;
 }
