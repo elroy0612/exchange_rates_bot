@@ -56,14 +56,18 @@ st.divider()
 
 # 기능 소개
 st.subheader("기능 소개")
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown("### 💬 환율 챗봇")
-    st.write("'100달러 원화로 얼마야?'처럼 자연어로 물어보세요.")
+    st.write("'100달러 원화로 얼마야?', '요즘 환율이 왜 떨어졌어?'처럼 자연어로 물어보세요.")
     st.page_link("page1.py", label="챗봇 바로가기", icon="💬")
 with col2:
     st.markdown("### 📈 환율 차트")
-    st.write("통화와 기간을 골라 환율 변화를 그래프로 확인하세요.")
+    st.write("통화와 기간을 골라 환율 변화와 최고·최저값을 확인하고 데이터를 내려받으세요.")
     st.page_link("page2.py", label="차트 바로가기", icon="📈")
+with col3:
+    st.markdown("### 🧮 환율 계산기")
+    st.write("금액과 통화를 고르면 바로 변환해 드려요.")
+    st.page_link("page3.py", label="계산기 바로가기", icon="🧮")
 
 st.caption("환율 데이터 출처: 유럽중앙은행(ECB) / Frankfurter API")

@@ -5,16 +5,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from api import API_URL, get_session
+from api import API_URL, get_currencies, get_session
 
 HISTORY_START = date(1999, 1, 4)  # Frankfurter(ECB) 데이터가 시작되는 날
-
-
-@st.cache_data(ttl=60 * 60 * 24)  # 통화 목록은 거의 바뀌지 않으므로 하루 동안 재사용
-def get_currencies():
-    res = get_session().get(f"{API_URL}/currencies", timeout=10)
-    res.raise_for_status()
-    return res.json()  # {"USD": "United States Dollar", "KRW": "South Korean Won", ...}
 
 
 # 환율은 하루 한 번(유럽 기준 오후 4시쯤) 갱신되므로 3시간 동안 재사용
@@ -82,10 +75,28 @@ latest = df[target].iloc[-1]
 first = df[target].iloc[0]
 change = latest - first
 
-st.metric(
+high_date, high = df[target].idxmax(), df[target].max()
+low_date, low = df[target].idxmin(), df[target].min()
+
+m1, m2, m3 = st.columns(3)
+m1.metric(
     label=f"1 {base} → {target} (기준일: {df.index[-1]:%Y-%m-%d})",
     value=f"{latest:,.2f}",
     delta=f"{change:,.2f} ({change / first * 100:+.2f}%)",
+)
+m2.metric(
+    label=f"{period} 최고",
+    value=f"{high:,.2f}",
+    delta=f"{high_date:%Y-%m-%d}",
+    delta_color="off",  # 날짜를 보여 주는 용도라 색과 화살표를 끔
+    delta_arrow="off",
+)
+m3.metric(
+    label=f"{period} 최저",
+    value=f"{low:,.2f}",
+    delta=f"{low_date:%Y-%m-%d}",
+    delta_color="off",
+    delta_arrow="off",
 )
 
 # 차트
@@ -163,3 +174,27 @@ chart = (zoom_layer + line + points + rule).properties(
     usermeta={"reset": st.session_state.chart_reset}  # 화면에는 안 보이고, 차트를 새로 그리게 하는 용도
 )
 st.altair_chart(chart, width="stretch", key=f"chart_{st.session_state.chart_reset}")
+
+# 원본 데이터 표 + CSV 다운로드 (선택한 기간)
+table_df = pd.DataFrame({
+    "날짜": df.index.date,
+    f"환율 ({base}→{target})": df[target].values,
+    "전일 대비": df[target].diff().values,
+}).iloc[::-1]  # 최신 날짜가 위로 오게
+
+with st.expander(f"📋 {period} 데이터 보기 ({len(table_df)}일)"):
+    st.dataframe(
+        table_df,
+        hide_index=True,
+        column_config={
+            f"환율 ({base}→{target})": st.column_config.NumberColumn(format="%.2f"),
+            "전일 대비": st.column_config.NumberColumn(format="%+.2f"),
+        },
+    )
+    st.download_button(
+        "⬇️ CSV 다운로드",
+        # utf-8-sig: 엑셀에서 열어도 한글이 깨지지 않게
+        data=table_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"{base}_{target}_{start}_{end}.csv",
+        mime="text/csv",
+    )
