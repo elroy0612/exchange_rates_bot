@@ -4,20 +4,20 @@ import pandas as pd
 import requests
 import streamlit as st
 
-API_URL = "https://api.frankfurter.app"
+from api import API_URL, get_session
 
 # (통화 코드, 표시 단위) - 엔화는 보통 100엔 기준으로 표시
 MAJOR_CURRENCIES = [("USD", 1), ("EUR", 1), ("JPY", 100)]
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=60 * 60 * 3)  # 환율은 하루 한 번 갱신되므로 3시간 동안 재사용
 def get_major_rates():
     """최근 일주일치 KRW 기준 환율을 가져와서 '외화 1단위 = 몇 원' 형태로 바꾼다."""
     end = date.today()
     start = end - timedelta(days=7)  # 주말·공휴일이 있어도 최근 2영업일이 포함되도록
     codes = ",".join(code for code, _ in MAJOR_CURRENCIES)
 
-    res = requests.get(
+    res = get_session().get(
         f"{API_URL}/{start}..{end}",
         params={"from": "KRW", "to": codes},
         timeout=10,

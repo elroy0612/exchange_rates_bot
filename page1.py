@@ -5,6 +5,8 @@ from langchain_tavily import TavilySearch
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 
+from api import API_URL, get_session
+
 @tool
 def get_exchange_rate(from_currency: str, to_currency: str, amount: float = 1.0) -> str:
     """
@@ -19,8 +21,8 @@ def get_exchange_rate(from_currency: str, to_currency: str, amount: float = 1.0)
         return f"{amount} {from_currency} = {amount} {to_currency} (같은 통화)"
     
     try:
-        res = requests.get(
-            "https://api.frankfurter.app/latest",
+        res = get_session().get(
+            f"{API_URL}/latest",
             params={"from": from_currency, "to": to_currency, "amount": amount},
             timeout=10,
         )
